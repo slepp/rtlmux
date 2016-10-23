@@ -65,6 +65,8 @@ struct client {
   struct {
     uint64_t in;
     uint64_t out;
+    uint64_t dropped;
+    uint64_t droppedCount;
   } data;
   time_t connected;
   uint32_t flags;
@@ -120,6 +122,8 @@ int sendDataToAllClients(struct rtlData *data) {
     if(client->flags == CLIENT_READY) {
       struct evbuffer *ev = bufferevent_get_output(client->bev);
       if(evbuffer_get_length(ev) > 4*1024*1024) { // If we've already buffered 4MByte, then start dropping frames
+        client->data.dropped += data->len;
+        client->data.droppedCount ++;
         continue;
       }
       ++data->references;
@@ -422,10 +426,12 @@ static void dumpClients(struct evhttp_request *req, void *arg) {
       evutil_inet_ntop(client->sa.sa_family, &client->sin6.sin6_addr, ipBuf, 128);
     else
       snprintf(ipBuf, 128, "from unknown address");
-    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%lu,\"dataOut\":%lu,\"connected\":%ld}",
+    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%lu,\"dataOut\":%lu,\"dropped\":{\"size\":%lu,\"count\":%lu},\"connected\":%ld}",
       ipBuf, ntohs(client->sa.sa_family == AF_INET ? client->sin.sin_port : client->sin6.sin6_port),
       client->data.in,
       client->data.out,
+      client->data.dropped,
+      client->data.droppedCount,
       client->connected
     );
     if(LIST_NEXT(client, peer) != NULL) {
