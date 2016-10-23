@@ -1,0 +1,13 @@
+package "rtlmux"
+version "1.0.0"
+purpose "Relay RTL TCP data to multiple clients."
+description "This will connect to an rtl_tcp server and allow multiple end clients to connect and control the RTL."
+
+versiontext "(c) 2016 Stephen Olesen"
+
+option "port" p "rtl_tcp port"
+  int typestr="port" default="1234" optional
+option "host" h "rtl_tcp host address"
+  string typestr="address" default="localhost" optional
+option "listen" l "Listening port for client connections"
+  int typestr="port" default="7878" optional
