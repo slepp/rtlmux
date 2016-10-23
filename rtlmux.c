@@ -41,7 +41,7 @@ struct event_base *event_base = NULL;
 struct bufferevent *serverConnection = NULL;
 
 unsigned long dataBlocks = 0;
-unsigned long dataBlockSize = 0;
+unsigned long dataBlocksSize = 0;
 struct rtlData {
   LIST_ENTRY(rtlData) next;
   uint32_t references;
