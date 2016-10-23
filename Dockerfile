@@ -2,7 +2,7 @@ FROM alpine
 
 RUN apk --no-cache add libevent
 
-COPY Makefile *.c *.h /app/
+COPY Makefile *.c *.h options.ggo /app/
 
 WORKDIR /app
 

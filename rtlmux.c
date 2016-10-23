@@ -51,6 +51,11 @@ struct client {
     struct sockaddr_in sin;
     struct sockaddr_in6 sin6;
   };
+  struct {
+    uint64_t in;
+    uint64_t out;
+  } data;
+  time_t connected;
   uint32_t flags;
 };
 
@@ -64,6 +69,8 @@ static struct client *addClient(struct bufferevent *bev, void *ptr) {
   
   client->bev = bev;
   client->flags = clientFlags;
+  client->data.in = client->data.out = 0;
+  client->connected = time(NULL);
   
   pthread_rwlock_wrlock(&clientLock);
   LIST_INSERT_HEAD(&clients, client, peer);
@@ -99,8 +106,12 @@ int sendDataToAllClients(struct rtlData *data) {
   LIST_FOREACH(client, &clients, peer) {
     if(client->flags == CLIENT_READY) {
       struct evbuffer *ev = bufferevent_get_output(client->bev);
+      if(evbuffer_get_length(ev) > 4*1024*1024) { // If we've already buffered 4MByte, then start dropping frames
+        continue;
+      }
       ++data->references;
       evbuffer_add_reference(ev, data->data, data->len, releaseDataRef, data);
+      client->data.out += data->len;
     }
   }
   pthread_rwlock_unlock(&clientLock);
@@ -140,6 +151,10 @@ struct serverInfo {
     unsigned int value;
     unsigned char set;
   } params[0xd]; // Store all the parameters as a simple command array
+  struct {
+    uint64_t in;
+    uint64_t out;
+  } data;
 } serverInfo;
 
 static void serverErrorEventCB(struct bufferevent *, short, void *);
@@ -150,7 +165,7 @@ static void connectToServer(void *arg) {
   *serverConnection = bufferevent_socket_new(event_base, -1, BEV_OPT_CLOSE_ON_FREE);
   bufferevent_socket_connect_hostname(*serverConnection, NULL, AF_UNSPEC, config.host, config.port);
   bufferevent_setcb(*serverConnection, serverReadCB, NULL, serverErrorEventCB, serverConnection);
-  bufferevent_setwatermark(*serverConnection, EV_READ, 16384, 8*1024*1024);
+  bufferevent_setwatermark(*serverConnection, EV_READ, 16384, 0);
   bufferevent_enable(*serverConnection, EV_READ|EV_WRITE);
 }
 
@@ -173,9 +188,9 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
   struct rtlData *data;
   
   if(serverInfo.state == SERVER_NEW) {
-    bufferevent_read(bev, serverInfo.magic, 4);
-    bufferevent_read(bev, &serverInfo.tuner_type, 4);
-    bufferevent_read(bev, &serverInfo.tuner_gain_count, 4);
+    serverInfo.data.in += bufferevent_read(bev, serverInfo.magic, 4);
+    serverInfo.data.in += bufferevent_read(bev, &serverInfo.tuner_type, 4);
+    serverInfo.data.in += bufferevent_read(bev, &serverInfo.tuner_gain_count, 4);
     if(serverInfo.magic[0] == 'R' && serverInfo.magic[1] == 'T' && serverInfo.magic[2] == 'L' && serverInfo.magic[3] == '0') {
       serverInfo.state = SERVER_CONNECTED;
       slog(LOG_INFO, SLOG_INFO, "Connected to server.");
@@ -193,19 +208,31 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
         cmd.cmd = i+1;
         cmd.param = serverInfo.params[i].value;
         slog(LOG_INFO, SLOG_INFO, "Sending command %d with param %lu", cmd.cmd, ntohl(cmd.param));
+        serverInfo.data.out += sizeof(cmd);
         bufferevent_write(bev, &cmd, sizeof(cmd));
       }
     }
   }
   
-  data = (struct rtlData *)calloc(1, sizeof(struct rtlData) + 16384);
+  struct evbuffer *ev = bufferevent_get_input(bev);
+  size_t availLen = evbuffer_get_length(ev);
+  
+  if(availLen == 0) // We may not have data, so return
+    return;
+  
+  if(availLen > 256*1024)
+    availLen = 256*1024; // Limit our input sizes to 256k chunks
+
+  data = (struct rtlData *)calloc(1, sizeof(struct rtlData) + availLen);
   data->data = (void *)data + sizeof(struct rtlData);
   data->references = 0;
-  data->len = bufferevent_read(bev, data->data, 16384);
+  serverInfo.data.in += data->len = bufferevent_read(bev, data->data, availLen);
   
   if(sendDataToAllClients(data) == 0) {
+    // No one was listening
     free(data);
   } else {
+    // Track the data block
     pthread_rwlock_wrlock(&rtlDataLock);
     LIST_INSERT_HEAD(&rtlDataList, data, next);    
     pthread_rwlock_unlock(&rtlDataLock);
@@ -245,6 +272,7 @@ void serverSendCommand(struct command cmd) {
   serverInfo.params[cmd.cmd-1].value = cmd.param;
   serverInfo.params[cmd.cmd-1].set = 1;
   slog(LOG_LIVE, SLOG_DEBUG, "Sending command to server: %d: %lu", cmd.cmd, ntohl(cmd.param));
+  serverInfo.data.out += sizeof(cmd);
   bufferevent_write(serverConnection, &cmd, sizeof(cmd));
 }
 
@@ -264,7 +292,10 @@ void serverSendCommand(struct command cmd) {
 
 static void clientReadCB(struct bufferevent *bev, void *ctx) {
   struct command cmd;
-  while(bufferevent_read(bev, &cmd, sizeof(cmd)) > 0) {
+  size_t l;
+  struct client *client = (struct client *)ctx;
+  while((l = bufferevent_read(bev, &cmd, sizeof(cmd))) > 0) {
+    client->data.in += l;
     slog(LOG_INFO, SLOG_INFO, "Read from client: %x", cmd.cmd);
     
     switch(cmd.cmd) {
@@ -341,16 +372,53 @@ static void connectCB(struct evconnlistener *listener,
       snprintf(ipBuf, 128, "from unknown address");
     slog(LOG_INFO, SLOG_INFO, "Connection from client %s", ipBuf);
     bufferevent_setcb(bev, clientReadCB, NULL, errorEventCB, client);
+    bufferevent_setwatermark(bev, EV_WRITE, 0, 4*1024*1024); // Limit output to 4MB?
     bufferevent_enable(bev, EV_READ|EV_WRITE);
     bufferevent_write(bev, serverInfo.magic, 4);
     bufferevent_write(bev, &serverInfo.tuner_type, 4);
     bufferevent_write(bev, &serverInfo.tuner_gain_count, 4);
+    serverInfo.data.out += 12;
     client->flags = CLIENT_READY;
 }
 
-void *serverThread(void *arg) {
-  int timeToExit = 0;
+static void dumpClients(struct evhttp_request *req, void *arg) {
+  struct evbuffer *evb = NULL;
+
+  evb = evbuffer_new();
+
+  pthread_rwlock_rdlock(&clientLock);
   
+  evbuffer_add_printf(evb, "{\"server\":{\"dataIn\":%llu,\"dataOut\":%llu},\"clients\":[",
+    serverInfo.data.in, serverInfo.data.out);
+  struct client *client;
+  LIST_FOREACH(client, &clients, peer) {
+    char ipBuf[128];
+    if(client->sa.sa_family == AF_INET)
+      evutil_inet_ntop(client->sa.sa_family, &client->sin.sin_addr, ipBuf, 128);
+    else if(client->sa.sa_family == AF_INET6)
+      evutil_inet_ntop(client->sa.sa_family, &client->sin6.sin6_addr, ipBuf, 128);
+    else
+      snprintf(ipBuf, 128, "from unknown address");
+    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%llu,\"dataOut\":%llu,\"connected\":%ld}",
+      ipBuf, ntohs(client->sa.sa_family == AF_INET ? client->sin.sin_port : client->sin6.sin6_port),
+      client->data.in,
+      client->data.out,
+      client->connected
+    );
+    if(LIST_NEXT(client, peer) != NULL) {
+      evbuffer_add_printf(evb, ",");
+    }
+  }
+  evbuffer_add_printf(evb, "]}");
+  
+  pthread_rwlock_unlock(&clientLock);
+  
+  evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
+  evhttp_add_header(evhttp_request_get_output_headers(req), "Access-Control-Allow-Origin", "*");
+  evhttp_send_reply(req, 200, "OK", evb);
+}
+
+void *serverThread(void *arg) {  
   memset(&serverInfo, 0, sizeof(serverInfo));
   
   slog(LOG_INFO, SLOG_INFO, "Starting server thread.");
@@ -392,8 +460,10 @@ void *serverThread(void *arg) {
   struct evhttp *http;
   struct evhttp_bound_socket *handle;
   http = evhttp_new(event_base);
+
+  evhttp_set_cb(http, "/stats.json", dumpClients, "clients");
   
-  handle = evhttp_bind_socket_with_handle(http, "::", 7879);
+  handle = evhttp_bind_socket_with_handle(http, "::", config.clientPort + 1);
 
   if(!handle) {
     slog(LOG_FATAL, SLOG_FATAL, "Could not bind HTTP listener.");
@@ -401,6 +471,7 @@ void *serverThread(void *arg) {
     return NULL;
   }
 
+  int loopCounter = 0;
   while(!timeToExit) {
     struct timeval tv;
     tv.tv_sec = 0;
@@ -408,6 +479,28 @@ void *serverThread(void *arg) {
     
     event_base_loopexit(event_base, &tv);
     event_base_dispatch(event_base);
+    
+    if((++loopCounter%3000) == 0) {
+      loopCounter = 0;
+      pthread_rwlock_rdlock(&clientLock);
+      struct client *client;
+      unsigned long clientCount = 0;
+      LIST_FOREACH(client, &clients, peer) {
+        clientCount++;
+      }
+      slog(LOG_INFO, SLOG_INFO, "Clients currently connected: %lu", clientCount);
+      pthread_rwlock_unlock(&clientLock);
+      pthread_rwlock_rdlock(&rtlDataLock);
+      unsigned long dataTotal = 0;
+      unsigned long dataBlocks = 0;
+      struct rtlData *rtldata;
+      LIST_FOREACH(rtldata, &rtlDataList, next) {
+        dataTotal += rtldata->len;
+        dataBlocks++;
+      }
+      slog(LOG_INFO, SLOG_INFO, "Maintaining %lu data buffers, total of %lu bytes.", dataBlocks, dataTotal);
+      pthread_rwlock_unlock(&rtlDataLock);
+    }
   }
   
   pthread_rwlock_wrlock(&clientLock);
