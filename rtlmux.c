@@ -31,7 +31,6 @@
 // Define this to enable thread safety around the lists
 //#define THREADED
 
-
 #ifndef THREADED
 #define pthread_rwlock_wrlock(a)
 #define pthread_rwlock_rdlock(a)
@@ -41,6 +40,8 @@
 struct event_base *event_base = NULL;
 struct bufferevent *serverConnection = NULL;
 
+unsigned long dataBlocks = 0;
+unsigned long dataBlockSize = 0;
 struct rtlData {
   LIST_ENTRY(rtlData) next;
   uint32_t references;
@@ -103,9 +104,11 @@ void releaseDataRef(const void *d, unsigned long len, void *ptr) {
   struct rtlData *data = (struct rtlData *)ptr;
   --data->references;
   if(data->references == 0) {
-    pthread_rwlock_wrlock(&rtlDataLock);
-    LIST_REMOVE(data, next);
-    pthread_rwlock_unlock(&rtlDataLock);
+    //pthread_rwlock_wrlock(&rtlDataLock);
+    //LIST_REMOVE(data, next);
+    //pthread_rwlock_unlock(&rtlDataLock);
+    dataBlocks--;
+    dataBlocksSize -= data->len;
     free(data); // This is a single malloc for both the data and header
   }
 }
@@ -235,7 +238,8 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
   if(availLen > 256*1024)
     availLen = 256*1024; // Limit our input sizes to 256k chunks
 
-  data = (struct rtlData *)calloc(1, sizeof(struct rtlData) + availLen);
+  data = (struct rtlData *)malloc(sizeof(struct rtlData) + availLen);
+  memset(data, 0, sizeof(struct rtlData));
   data->data = (void *)data + sizeof(struct rtlData);
   data->references = 0;
   serverInfo.data.in += data->len = bufferevent_read(bev, data->data, availLen);
@@ -244,10 +248,12 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
     // No one was listening
     free(data);
   } else {
+    dataBlocks++;
+    dataBlocksSize += data->len;    
     // Track the data block
-    pthread_rwlock_wrlock(&rtlDataLock);
-    LIST_INSERT_HEAD(&rtlDataList, data, next);    
-    pthread_rwlock_unlock(&rtlDataLock);
+    //pthread_rwlock_wrlock(&rtlDataLock);
+    //LIST_INSERT_HEAD(&rtlDataList, data, next);    
+    //pthread_rwlock_unlock(&rtlDataLock);
   }
 }
 
@@ -370,8 +376,13 @@ static void clientReadCB(struct bufferevent *bev, void *ctx) {
 static void connectCB(struct evconnlistener *listener,
     evutil_socket_t sock, struct sockaddr *addr, int len, void *ptr) {
     struct event_base *base = evconnlistener_get_base(listener);
+#ifdef THREADED
     struct bufferevent *bev = bufferevent_socket_new(
             base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
+#else
+    struct bufferevent *bev = bufferevent_socket_new(
+            base, sock, BEV_OPT_CLOSE_ON_FREE);
+#endif
 
     struct client *client = addClient(bev, ptr);
     memcpy(&client->sa, addr, len);
@@ -492,25 +503,19 @@ void *serverThread(void *arg) {
     event_base_loopexit(event_base, &tv);
     event_base_dispatch(event_base);
     
-    if((++loopCounter%3000) == 0) {
+    if((++loopCounter%600) == 0) {
       loopCounter = 0;
-      pthread_rwlock_rdlock(&clientLock);
+/*      pthread_rwlock_rdlock(&clientLock);
       struct client *client;
       unsigned long clientCount = 0;
       LIST_FOREACH(client, &clients, peer) {
         clientCount++;
       }
       slog(LOG_INFO, SLOG_INFO, "Clients currently connected: %lu", clientCount);
-      pthread_rwlock_unlock(&clientLock);
+      pthread_rwlock_unlock(&clientLock);*/
       pthread_rwlock_rdlock(&rtlDataLock);
-      unsigned long dataTotal = 0;
-      unsigned long dataBlocks = 0;
-      struct rtlData *rtldata;
-      LIST_FOREACH(rtldata, &rtlDataList, next) {
-        dataTotal += rtldata->len;
-        dataBlocks++;
-      }
-      slog(LOG_INFO, SLOG_INFO, "Maintaining %lu data buffers, total of %lu bytes.", dataBlocks, dataTotal);
+      if(dataBlocks > 0)
+        slog(LOG_INFO, SLOG_INFO, "Maintaining %lu data buffers, total of %lu bytes.", dataBlocks, dataBlocksSize);
       pthread_rwlock_unlock(&rtlDataLock);
     }
   }

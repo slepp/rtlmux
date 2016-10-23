@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -I/usr/local/include
+CFLAGS=-Wall -I/usr/local/include -O3
 
 LIBS=-pthread `pkg-config libevent --libs-only-L` -levent -levent_pthreads
 
