@@ -28,6 +28,16 @@
 
 #include <sys/queue.h>
 
+// Define this to enable thread safety around the lists
+//#define THREADED
+
+
+#ifndef THREADED
+#define pthread_rwlock_wrlock(a)
+#define pthread_rwlock_rdlock(a)
+#define pthread_rwlock_unlock(a)
+#endif
+
 struct event_base *event_base = NULL;
 struct bufferevent *serverConnection = NULL;
 
@@ -75,14 +85,14 @@ static struct client *addClient(struct bufferevent *bev, void *ptr) {
   pthread_rwlock_wrlock(&clientLock);
   LIST_INSERT_HEAD(&clients, client, peer);
   pthread_rwlock_unlock(&clientLock);
-
+  
   return client;
 }
 
 static void removeClient(struct client *client) {
   if(!client)
     return;
-    
+  
   pthread_rwlock_wrlock(&clientLock);
   LIST_REMOVE(client, peer);
   free(client);
