@@ -1,8 +1,9 @@
 stages:
 - build
 
-build:
+build:make:
  image: alpine
+ stage: build
  script:
  - "apk --update add --virtual build-dependencies build-base libevent-dev bsd-compat-headers"
  - make
