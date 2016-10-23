@@ -162,8 +162,10 @@ static void serverReadCB(struct bufferevent *, void *);
 
 static void connectToServer(void *arg) {
   struct bufferevent **serverConnection = (struct bufferevent **)arg;
+  slog(LOG_INFO, SLOG_INFO, "Starting connection lookup for %s:%d", config.host, config.port);
   *serverConnection = bufferevent_socket_new(event_base, -1, BEV_OPT_CLOSE_ON_FREE);
   bufferevent_socket_connect_hostname(*serverConnection, NULL, AF_UNSPEC, config.host, config.port);
+  slog(LOG_INFO, SLOG_INFO, "Started to connect to %s:%d", config.host, config.port);
   bufferevent_setcb(*serverConnection, serverReadCB, NULL, serverErrorEventCB, serverConnection);
   bufferevent_setwatermark(*serverConnection, EV_READ, 16384, 0);
   bufferevent_enable(*serverConnection, EV_READ|EV_WRITE);
@@ -388,7 +390,7 @@ static void dumpClients(struct evhttp_request *req, void *arg) {
 
   pthread_rwlock_rdlock(&clientLock);
   
-  evbuffer_add_printf(evb, "{\"server\":{\"dataIn\":%llu,\"dataOut\":%llu},\"clients\":[",
+  evbuffer_add_printf(evb, "{\"server\":{\"dataIn\":%lu,\"dataOut\":%lu},\"clients\":[",
     serverInfo.data.in, serverInfo.data.out);
   struct client *client;
   LIST_FOREACH(client, &clients, peer) {
@@ -399,7 +401,7 @@ static void dumpClients(struct evhttp_request *req, void *arg) {
       evutil_inet_ntop(client->sa.sa_family, &client->sin6.sin6_addr, ipBuf, 128);
     else
       snprintf(ipBuf, 128, "from unknown address");
-    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%llu,\"dataOut\":%llu,\"connected\":%ld}",
+    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%lu,\"dataOut\":%lu,\"connected\":%ld}",
       ipBuf, ntohs(client->sa.sa_family == AF_INET ? client->sin.sin_port : client->sin6.sin6_port),
       client->data.in,
       client->data.out,
