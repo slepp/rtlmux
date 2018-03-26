@@ -8,6 +8,8 @@ struct config {
   char *host;
   uint16_t port;
   uint16_t clientPort;
+  int delayed;
+  int restart;
 };
 
 extern struct config config;

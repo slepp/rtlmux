@@ -19,7 +19,9 @@ int convertConfig(struct gengetopt_args_info *args) {
   config.host = args->host_arg;
   config.port = args->port_arg;
   config.clientPort = args->listen_arg;
-  
+  config.delayed = args->delayed_flag;
+  config.restart = args->restart_flag;
+
   return 1;
 }
 
