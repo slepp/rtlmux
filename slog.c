@@ -128,16 +128,16 @@ char* strclr(const char* clr, char* str, ...)
 {
     /* String buffers */
     static char output[MAXMSG];
-    char string[MAXMSG];
+    char string[MAXMSG - 64]; /* Reserve space for color codes and formatting */
 
     /* Read args */
     va_list args;
     va_start(args, str);
-    vsprintf(string, str, args);
+    vsnprintf(string, sizeof(string), str, args);
     va_end(args);
 
     /* Colorize string */
-    sprintf(output, "%s%s%s", clr, string, CLR_RESET);
+    snprintf(output, MAXMSG, "%s%s%s", clr, string, CLR_RESET);
 
     return output;
 }
@@ -244,16 +244,16 @@ char* slog_get(SlogDate *pDate, char *msg, ...)
 {
     /* Used variables */
     static char output[MAXMSG];
-    char string[MAXMSG];
+    char string[MAXMSG - 64]; /* Reserve space for date formatting */
 
     /* Read args */
     va_list args;
     va_start(args, msg);
-    vsprintf(string, msg, args);
+    vsnprintf(string, sizeof(string), msg, args);
     va_end(args);
 
     /* Generate output string with date */
-    sprintf(output, "%02d.%02d.%02d-%02d:%02d:%02d.%02d - %s", 
+    snprintf(output, MAXMSG, "%02d.%02d.%02d-%02d:%02d:%02d.%02d - %s", 
         pDate->year, pDate->mon, pDate->day, pDate->hour, 
         pDate->min, pDate->sec, pDate->usec, string);
 
