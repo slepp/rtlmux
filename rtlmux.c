@@ -382,10 +382,10 @@ static void connectCB(struct evconnlistener *listener,
     struct event_base *base = evconnlistener_get_base(listener);
 #ifdef THREADED
     struct bufferevent *bev = bufferevent_socket_new(
-            base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
+            base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS);
 #else
     struct bufferevent *bev = bufferevent_socket_new(
-            base, sock, BEV_OPT_CLOSE_ON_FREE);
+            base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
 #endif
 
     struct client *client = addClient(bev, ptr);
@@ -399,7 +399,6 @@ static void connectCB(struct evconnlistener *listener,
       snprintf(ipBuf, 128, "from unknown address");
     slog(LOG_INFO, SLOG_INFO, "Connection from client %s", ipBuf);
     bufferevent_setcb(bev, clientReadCB, NULL, errorEventCB, client);
-    bufferevent_setwatermark(bev, EV_WRITE, 0, 4*1024*1024); // Limit output to 4MB?
     bufferevent_enable(bev, EV_READ|EV_WRITE);
     bufferevent_write(bev, serverInfo.magic, 4);
     bufferevent_write(bev, &serverInfo.tuner_type, 4);
