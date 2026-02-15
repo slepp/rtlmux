@@ -61,6 +61,10 @@ struct timespec orwl_gettime(void) {
 /* Max size of string */
 #define MAXMSG 8196
 
+/* Reserve space for formatting overhead */
+#define COLOR_FORMAT_RESERVE 64  /* Space for ANSI color codes and CLR_RESET */
+#define DATE_FORMAT_RESERVE 32   /* Space for date/time prefix (22 chars + margin) */
+
 /* Flags */
 static SlogFlags slg;
 static pthread_mutex_t slog_mutex;
@@ -128,16 +132,16 @@ char* strclr(const char* clr, char* str, ...)
 {
     /* String buffers */
     static char output[MAXMSG];
-    char string[MAXMSG];
+    char string[MAXMSG - COLOR_FORMAT_RESERVE];
 
     /* Read args */
     va_list args;
     va_start(args, str);
-    vsprintf(string, str, args);
+    vsnprintf(string, sizeof(string), str, args);
     va_end(args);
 
     /* Colorize string */
-    sprintf(output, "%s%s%s", clr, string, CLR_RESET);
+    snprintf(output, MAXMSG, "%s%s%s", clr, string, CLR_RESET);
 
     return output;
 }
@@ -244,16 +248,16 @@ char* slog_get(SlogDate *pDate, char *msg, ...)
 {
     /* Used variables */
     static char output[MAXMSG];
-    char string[MAXMSG];
+    char string[MAXMSG - DATE_FORMAT_RESERVE];
 
     /* Read args */
     va_list args;
     va_start(args, msg);
-    vsprintf(string, msg, args);
+    vsnprintf(string, sizeof(string), msg, args);
     va_end(args);
 
     /* Generate output string with date */
-    sprintf(output, "%02d.%02d.%02d-%02d:%02d:%02d.%02d - %s", 
+    snprintf(output, MAXMSG, "%02d.%02d.%02d-%02d:%02d:%02d.%02d - %s", 
         pDate->year, pDate->mon, pDate->day, pDate->hour, 
         pDate->min, pDate->sec, pDate->usec, string);
 
