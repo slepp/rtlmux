@@ -61,6 +61,10 @@ struct timespec orwl_gettime(void) {
 /* Max size of string */
 #define MAXMSG 8196
 
+/* Reserve space for formatting overhead */
+#define COLOR_FORMAT_RESERVE 64  /* Space for ANSI color codes and CLR_RESET */
+#define DATE_FORMAT_RESERVE 32   /* Space for date/time prefix (22 chars + margin) */
+
 /* Flags */
 static SlogFlags slg;
 static pthread_mutex_t slog_mutex;
@@ -128,7 +132,7 @@ char* strclr(const char* clr, char* str, ...)
 {
     /* String buffers */
     static char output[MAXMSG];
-    char string[MAXMSG - 64]; /* Reserve space for color codes and formatting */
+    char string[MAXMSG - COLOR_FORMAT_RESERVE];
 
     /* Read args */
     va_list args;
@@ -244,7 +248,7 @@ char* slog_get(SlogDate *pDate, char *msg, ...)
 {
     /* Used variables */
     static char output[MAXMSG];
-    char string[MAXMSG - 64]; /* Reserve space for date formatting */
+    char string[MAXMSG - DATE_FORMAT_RESERVE];
 
     /* Read args */
     va_list args;
