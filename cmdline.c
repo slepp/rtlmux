@@ -39,10 +39,13 @@ const char *gengetopt_args_info_help[] = {
   "  -p, --port=port     rtl_tcp port  (default=`1234')",
   "  -h, --host=address  rtl_tcp host address  (default=`localhost')",
   "  -l, --listen=port   Listening port for client connections  (default=`7878')",
+  "  -d, --delayed       Delayed connection to the server  (default=off)",
+  "  -r, --restart       Restart server's connection when last client disconnects  (default=off)",
     0
 };
 
 typedef enum {ARG_NO
+  , ARG_FLAG
   , ARG_STRING
   , ARG_INT
 } cmdline_c_arg_type;
@@ -92,6 +95,8 @@ void clear_given (struct gengetopt_args_info *args_info)
   args_info->port_given = 0 ;
   args_info->host_given = 0 ;
   args_info->listen_given = 0 ;
+  args_info->delayed_given = 0 ;
+  args_info->restart_given = 0 ;
 }
 
 static
@@ -104,6 +109,8 @@ void clear_args (struct gengetopt_args_info *args_info)
   args_info->host_orig = NULL;
   args_info->listen_arg = 7878;
   args_info->listen_orig = NULL;
+  args_info->delayed_flag = 0;
+  args_info->restart_flag = 0;
   
 }
 
@@ -117,6 +124,8 @@ void init_args_info(struct gengetopt_args_info *args_info)
   args_info->port_help = gengetopt_args_info_help[2] ;
   args_info->host_help = gengetopt_args_info_help[3] ;
   args_info->listen_help = gengetopt_args_info_help[4] ;
+  args_info->delayed_help = gengetopt_args_info_help[5] ;
+  args_info->restart_help = gengetopt_args_info_help[6] ;
   
 }
 
@@ -244,6 +253,10 @@ cmdline_c_dump(FILE *outfile, struct gengetopt_args_info *args_info)
     write_into_file(outfile, "host", args_info->host_orig, 0);
   if (args_info->listen_given)
     write_into_file(outfile, "listen", args_info->listen_orig, 0);
+  if (args_info->delayed_given)
+    write_into_file(outfile, "delayed", 0, 0 );
+  if (args_info->restart_given)
+    write_into_file(outfile, "restart", 0, 0 );
   
 
   i = EXIT_SUCCESS;
@@ -410,6 +423,9 @@ int update_arg(void *field, char **orig_field,
     val = possible_values[found];
 
   switch(arg_type) {
+  case ARG_FLAG:
+    *((int *)field) = !*((int *)field);
+    break;
   case ARG_INT:
     if (val) *((int *)field) = strtol (val, &stop_char, 0);
     break;
@@ -440,6 +456,7 @@ int update_arg(void *field, char **orig_field,
   /* store the original value */
   switch(arg_type) {
   case ARG_NO:
+  case ARG_FLAG:
     break;
   default:
     if (value && orig_field) {
@@ -499,10 +516,12 @@ cmdline_c_internal (
         { "port",	1, NULL, 'p' },
         { "host",	1, NULL, 'h' },
         { "listen",	1, NULL, 'l' },
+        { "delayed",	0, NULL, 'd' },
+        { "restart",	0, NULL, 'r' },
         { 0,  0, 0, 0 }
       };
 
-      c = getopt_long (argc, argv, "Vp:h:l:", long_options, &option_index);
+      c = getopt_long (argc, argv, "Vp:h:l:dr", long_options, &option_index);
 
       if (c == -1) break;	/* Exit from `while (1)' loop.  */
 
@@ -545,6 +564,26 @@ cmdline_c_internal (
               &(local_args_info.listen_given), optarg, 0, "7878", ARG_INT,
               check_ambiguity, override, 0, 0,
               "listen", 'l',
+              additional_error))
+            goto failure;
+        
+          break;
+        case 'd':	/* Delayed connection to the server.  */
+        
+        
+          if (update_arg((void *)&(args_info->delayed_flag), 0, &(args_info->delayed_given),
+              &(local_args_info.delayed_given), optarg, 0, 0, ARG_FLAG,
+              check_ambiguity, override, 1, 0, "delayed", 'd',
+              additional_error))
+            goto failure;
+        
+          break;
+        case 'r':	/* Restart server's connection when last client disconnects.  */
+        
+        
+          if (update_arg((void *)&(args_info->restart_flag), 0, &(args_info->restart_given),
+              &(local_args_info.restart_given), optarg, 0, 0, ARG_FLAG,
+              check_ambiguity, override, 1, 0, "restart", 'r',
               additional_error))
             goto failure;
         

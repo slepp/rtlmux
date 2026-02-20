@@ -216,7 +216,11 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
     } else { // Failed to receive the magic header
       slog(LOG_ERROR, SLOG_ERROR, "Failed to receive magic header from server.");
       bufferevent_free(bev);
-      connectToServerSoon(ctx);
+      if (config.delayed) {
+        timeToExit = config.restart ? 2 : 1;
+      } else {
+        connectToServerSoon(ctx);
+      }
       return;
     }
     // Send stored and set parameters on reconnect
@@ -251,6 +255,10 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
   if(sendDataToAllClients(data) == 0) {
     // No one was listening
     free(data);
+    if (config.delayed) {
+      slog(LOG_INFO, SLOG_INFO, "Last user disconnected.");
+      timeToExit = config.restart ? 2 : 1;
+    }
   } else {
     dataBlocks++;
     dataBlocksSize += data->len;    
@@ -388,6 +396,11 @@ static void connectCB(struct evconnlistener *listener,
             base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
 #endif
 
+    if (config.delayed && (serverConnection == NULL || LIST_FIRST(&clients) == NULL)) {
+      slog(LOG_INFO, SLOG_INFO, "Connection to server triggered.");
+      connectToServer(&serverConnection);
+    }
+
     struct client *client = addClient(bev, ptr);
     memcpy(&client->sa, addr, len);
     char ipBuf[128];
@@ -397,8 +410,9 @@ static void connectCB(struct evconnlistener *listener,
       evutil_inet_ntop(client->sa.sa_family, &client->sin6.sin6_addr, ipBuf, 128);
     else
       snprintf(ipBuf, 128, "from unknown address");
-    slog(LOG_INFO, SLOG_INFO, "Connection from client %s", ipBuf);
+    slog(LOG_INFO, SLOG_INFO, "Connection from client %s%s", ipBuf, LIST_NEXT(client,peer) == NULL ? " (first!)" : "");
     bufferevent_setcb(bev, clientReadCB, NULL, errorEventCB, client);
+    bufferevent_setwatermark(bev, EV_WRITE, 0, 4*1024*1024); // Limit output to 4MB
     bufferevent_enable(bev, EV_READ|EV_WRITE);
     bufferevent_write(bev, serverInfo.magic, 4);
     bufferevent_write(bev, &serverInfo.tuner_type, 4);
@@ -482,8 +496,12 @@ void *serverThread(void *arg) {
   }
   
   slog(LOG_INFO, SLOG_INFO, "Listening for clients on port %d", config.clientPort);
-  
-  connectToServer(&serverConnection);
+
+  if (!config.delayed) {
+    connectToServer(&serverConnection);
+  } else {
+    slog(LOG_INFO, SLOG_INFO, "Connection to server delayed.");
+  }
 
   struct evhttp *http;
   struct evhttp_bound_socket *handle;
@@ -538,6 +556,14 @@ void *serverThread(void *arg) {
   evhttp_free(http);
   
   event_base_free(event_base);
-  
+
+  if (serverConnection != NULL) {
+    bufferevent_free(serverConnection);
+    serverConnection = NULL;
+    serverInfo.state = SERVER_DISCONNECTED;
+    slog(LOG_INFO, SLOG_INFO, "Disconnecting from server.");
+  }
+
+  slog(LOG_INFO, SLOG_INFO, "End of server thread.");
   return NULL;
 }

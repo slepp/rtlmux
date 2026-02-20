@@ -23,7 +23,14 @@ int main(int argc, char **argv) {
   sigaction(SIGTERM, &sigact, NULL);
   sigaction(SIGINT, &sigact, NULL);
   
-  pthread_create(&threadServer, NULL, serverThread, NULL);
-  
-  pthread_join(threadServer, NULL);
+  do {
+    pthread_create(&threadServer, NULL, serverThread, NULL);
+
+    pthread_join(threadServer, NULL);
+
+    if (timeToExit == 2) {
+      slog(LOG_INFO, SLOG_INFO, "Restarting.");
+      timeToExit = 0;
+    }
+  } while (timeToExit != 1);
 }
