@@ -48,12 +48,18 @@ struct gengetopt_args_info
   int listen_arg;	/**< @brief Listening port for client connections (default='7878').  */
   char * listen_orig;	/**< @brief Listening port for client connections original value given at command line.  */
   const char *listen_help; /**< @brief Listening port for client connections help description.  */
+  int delayed_flag;	/**< @brief Delayed connection to the server (default=off).  */
+  const char *delayed_help; /**< @brief Delayed connection to the server help description.  */
+  int restart_flag;	/**< @brief Restart server's connection when last client disconnects (default=off).  */
+  const char *restart_help; /**< @brief Restart server's connection when last client disconnects help description.  */
   
   unsigned int help_given ;	/**< @brief Whether help was given.  */
   unsigned int version_given ;	/**< @brief Whether version was given.  */
   unsigned int port_given ;	/**< @brief Whether port was given.  */
   unsigned int host_given ;	/**< @brief Whether host was given.  */
   unsigned int listen_given ;	/**< @brief Whether listen was given.  */
+  unsigned int delayed_given ;	/**< @brief Whether delayed was given.  */
+  unsigned int restart_given ;	/**< @brief Whether restart was given.  */
 
 } ;
 
