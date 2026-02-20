@@ -11,3 +11,7 @@ option "host" h "rtl_tcp host address"
   string typestr="address" default="localhost" optional
 option "listen" l "Listening port for client connections"
   int typestr="port" default="7878" optional
+option "delayed" d "Delayed connection to the server"
+  flag off
+option "restart" r "Restart server's connection when last client disconnects"
+  flag off
