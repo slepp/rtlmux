@@ -82,6 +82,8 @@ sudo make install
 docker build --target runtime -t rtlmux .
 ```
 
+The generated command-line parser is committed to the repository. Install `gengetopt` and run `make generate` only when changing `options.ggo`.
+
 ## Releases
 
 Pushing a tag such as `v1.1.0` builds static Linux binaries for amd64, arm64, and ARMv7, creates checksums, and publishes a GitHub release.

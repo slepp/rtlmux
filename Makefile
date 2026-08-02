@@ -21,7 +21,7 @@ SRC = slog.c rtlmux.c config.c cmdline.c main.c
 OBJS = $(SRC:.c=.o)
 DEPS = $(OBJS:.o=.d)
 
-.PHONY: all clean install static test
+.PHONY: all clean generate install static test
 
 all: rtlmux
 
@@ -33,10 +33,8 @@ rtlmux: $(OBJS)
 
 cmdline.o: CFLAGS += -Wno-unused-but-set-variable
 
-cmdline.h: options.ggo
+generate: options.ggo
 	$(GENGETOPT) -C -i $< -f cmdline.c
-
-cmdline.c: cmdline.h
 
 static:
 	$(MAKE) clean
