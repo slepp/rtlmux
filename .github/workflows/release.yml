@@ -85,10 +85,13 @@ jobs:
       - name: Check Docker Hub credentials
         id: dockerhub
         run: |
-          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::Docker Hub publishing skipped; configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == "refs/heads/master" || "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Docker Hub publishing skipped; configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
+            echo "::notice::Docker Hub publishing skipped for $GITHUB_REF."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 

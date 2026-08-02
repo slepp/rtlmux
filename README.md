@@ -38,7 +38,7 @@ rtlmux [OPTIONS]
   -h, --host=ADDRESS  rtl_tcp server address (default: localhost)
   -p, --port=PORT     rtl_tcp server port (default: 1234)
   -l, --listen=PORT   client listening port (default: 7878)
-  -d, --delayed       connect upstream only when a client arrives
+  -d, --delayed       connect upstream on demand and exit after the last client
   -r, --restart       restart after the last client disconnects
   -V, --version       print version and exit
       --help          print complete help and exit
@@ -46,7 +46,7 @@ rtlmux [OPTIONS]
 
 The HTTP status endpoint uses the port immediately after the client port. For example, `-l 7878` uses port `7879` for HTTP.
 
-For standby operation, use `-d -r` together:
+With `-d` alone, `rtlmux` exits after the last client disconnects. For a long-running standby service, use `-d -r` together:
 
 ```sh
 ./rtlmux-linux-armv7 -h 192.168.1.50 -p 1234 -l 7878 -d -r
