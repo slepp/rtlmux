@@ -200,6 +200,45 @@ class RtlmuxTest(unittest.TestCase):
         process.terminate()
         self.assertEqual(process.wait(timeout=3), 0)
 
+    def test_delayed_restart_accepts_a_new_client(self):
+        upstream = socket.socket()
+        upstream.bind(("127.0.0.1", 0))
+        upstream.listen()
+        upstream_port = upstream.getsockname()[1]
+        listen_port = unused_port_pair()
+        disconnected = [threading.Event(), threading.Event()]
+
+        def serve():
+            for index in range(2):
+                connection, _ = upstream.accept()
+                connection.sendall(b"RTL0" + (index + 1).to_bytes(4, "big") + (2).to_bytes(4, "big"))
+                connection.settimeout(3)
+                try:
+                    while connection.recv(1024):
+                        pass
+                except socket.timeout:
+                    pass
+                connection.close()
+                disconnected[index].set()
+            upstream.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        self.addCleanup(thread.join, 4)
+        self.start_rtlmux(upstream_port, listen_port, "-d", "-r")
+
+        first = connect_with_retry(listen_port)
+        first.settimeout(2)
+        self.assertEqual(first.recv(12), b"RTL0" + (1).to_bytes(4, "big") + (2).to_bytes(4, "big"))
+        first.close()
+        self.assertTrue(disconnected[0].wait(3))
+
+        second = connect_with_retry(listen_port)
+        second.settimeout(2)
+        self.assertEqual(second.recv(12), b"RTL0" + (2).to_bytes(4, "big") + (2).to_bytes(4, "big"))
+        second.close()
+        self.assertTrue(disconnected[1].wait(3))
+
 
 if __name__ == "__main__":
     unittest.main()
