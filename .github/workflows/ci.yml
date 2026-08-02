@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libevent-dev
+
+      - name: Build and test
+        run: make test
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build static Linux binary
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          target: release
+          outputs: type=local,dest=dist
+
+      - name: Verify static Linux binary
+        run: |
+          file dist/rtlmux-linux-amd64
+          file dist/rtlmux-linux-amd64 | grep -q "statically linked"
