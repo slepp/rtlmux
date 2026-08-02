@@ -16,9 +16,22 @@ struct config config;
 static struct gengetopt_args_info args;
 
 int convertConfig(struct gengetopt_args_info *args) {
+  if(args->port_arg < 1 || args->port_arg > UINT16_MAX) {
+    fprintf(stderr, "rtl_tcp port must be between 1 and %u.\n", UINT16_MAX);
+    return 0;
+  }
+  if(args->listen_arg < 1 || args->listen_arg >= UINT16_MAX) {
+    fprintf(stderr, "Listening port must be between 1 and %u to reserve the following port for HTTP status.\n", UINT16_MAX - 1);
+    return 0;
+  }
+  if(args->host_arg == NULL || args->host_arg[0] == '\0') {
+    fprintf(stderr, "rtl_tcp host address cannot be empty.\n");
+    return 0;
+  }
+
   config.host = args->host_arg;
-  config.port = args->port_arg;
-  config.clientPort = args->listen_arg;
+  config.port = (uint16_t)args->port_arg;
+  config.clientPort = (uint16_t)args->listen_arg;
   config.delayed = args->delayed_flag;
   config.restart = args->restart_flag;
 
@@ -42,5 +55,8 @@ int parseConfig(int argc, char **argv) {
     exit(4);
   }
   
-  return convertConfig(&args);
+  if(!convertConfig(&args))
+    exit(4);
+
+  return 1;
 }

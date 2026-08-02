@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
@@ -28,30 +29,17 @@
 
 #include <sys/queue.h>
 
-// Define this to enable thread safety around the lists
-//#define THREADED
-
-#ifndef THREADED
-#define pthread_rwlock_wrlock(a)
-#define pthread_rwlock_rdlock(a)
-#define pthread_rwlock_unlock(a)
-#endif
-
 struct event_base *event_base = NULL;
 struct bufferevent *serverConnection = NULL;
 
 unsigned long dataBlocks = 0;
 unsigned long dataBlocksSize = 0;
 struct rtlData {
-  LIST_ENTRY(rtlData) next;
   uint32_t references;
   uint32_t len;
   uint8_t *data;
 };
-static LIST_HEAD(rtlDataHead, rtlData) rtlDataList = LIST_HEAD_INITIALIZER(rtlDataList);
-static pthread_rwlock_t rtlDataLock;
 
-#define CLIENT_UNKNOWN 1
 #define CLIENT_READY 2
 #define CLIENT_INIT 4
 struct client {
@@ -73,21 +61,20 @@ struct client {
 };
 
 static LIST_HEAD(clienthead, client) clients = LIST_HEAD_INITIALIZER(clients);
-static pthread_rwlock_t clientLock;
 
-static struct client *addClient(struct bufferevent *bev, void *ptr) {
+static struct client *addClient(struct bufferevent *bev) {
   uint32_t clientFlags = CLIENT_INIT;
   
   struct client *client = (struct client *)calloc(1, sizeof(struct client));
+  if(client == NULL)
+    return NULL;
   
   client->bev = bev;
   client->flags = clientFlags;
   client->data.in = client->data.out = 0;
   client->connected = time(NULL);
   
-  pthread_rwlock_wrlock(&clientLock);
   LIST_INSERT_HEAD(&clients, client, peer);
-  pthread_rwlock_unlock(&clientLock);
   
   return client;
 }
@@ -96,19 +83,21 @@ static void removeClient(struct client *client) {
   if(!client)
     return;
   
-  pthread_rwlock_wrlock(&clientLock);
   LIST_REMOVE(client, peer);
   free(client);
-  pthread_rwlock_unlock(&clientLock);
+
+  if(config.delayed && LIST_EMPTY(&clients)) {
+    slog(LOG_INFO, SLOG_INFO, "Last user disconnected.");
+    timeToExit = config.restart ? 2 : 1;
+  }
 }
 
 void releaseDataRef(const void *d, unsigned long len, void *ptr) {
+  (void)d;
+  (void)len;
   struct rtlData *data = (struct rtlData *)ptr;
   --data->references;
   if(data->references == 0) {
-    //pthread_rwlock_wrlock(&rtlDataLock);
-    //LIST_REMOVE(data, next);
-    //pthread_rwlock_unlock(&rtlDataLock);
     dataBlocks--;
     dataBlocksSize -= data->len;
     free(data); // This is a single malloc for both the data and header
@@ -117,7 +106,6 @@ void releaseDataRef(const void *d, unsigned long len, void *ptr) {
 
 int sendDataToAllClients(struct rtlData *data) {
   struct client *client;
-  pthread_rwlock_rdlock(&clientLock);
   LIST_FOREACH(client, &clients, peer) {
     if(client->flags == CLIENT_READY) {
       struct evbuffer *ev = bufferevent_get_output(client->bev);
@@ -126,23 +114,16 @@ int sendDataToAllClients(struct rtlData *data) {
         client->data.droppedCount ++;
         continue;
       }
-      ++data->references;
-      evbuffer_add_reference(ev, data->data, data->len, releaseDataRef, data);
-      client->data.out += data->len;
+      if(evbuffer_add_reference(ev, data->data, data->len, releaseDataRef, data) == 0) {
+        ++data->references;
+        client->data.out += data->len;
+      } else {
+        client->data.dropped += data->len;
+        client->data.droppedCount ++;
+      }
     }
   }
-  pthread_rwlock_unlock(&clientLock);
   return data->references;
-}
-
-void sendToAllClients(char *buf, size_t len, uint32_t flags) {
-  struct client *client;
-  pthread_rwlock_rdlock(&clientLock);
-  LIST_FOREACH(client, &clients, peer) {
-    if((client->flags & flags) != 0)
-      bufferevent_write(client->bev, buf, len);
-  }
-  pthread_rwlock_unlock(&clientLock);
 }
 
 static void logCB(int severity, const char *msg) {
@@ -156,7 +137,7 @@ static void logCB(int severity, const char *msg) {
     default: level = LOG_LIVE; flag = LOG_LIVE; break;
   }
   
-  slog(level, flag, msg);
+  slog(level, flag, "%s", msg);
 }
 
 struct serverInfo {
@@ -165,8 +146,8 @@ struct serverInfo {
   uint32_t tuner_type;
   uint32_t tuner_gain_count;
   struct {
-    unsigned int value;
-    unsigned char set;
+    uint32_t value;
+    uint8_t set;
   } params[0xd]; // Store all the parameters as a simple command array
   struct {
     uint64_t in;
@@ -174,52 +155,106 @@ struct serverInfo {
   } data;
 } serverInfo;
 
+static void readyClient(struct client *client) {
+  uint8_t header[12];
+  memcpy(header, serverInfo.magic, 4);
+  memcpy(header + 4, &serverInfo.tuner_type, 4);
+  memcpy(header + 8, &serverInfo.tuner_gain_count, 4);
+
+  if(bufferevent_write(client->bev, header, sizeof(header)) == 0) {
+    client->data.out += 12;
+    client->flags = CLIENT_READY;
+  }
+}
+
+static void readyWaitingClients(void) {
+  struct client *client;
+  LIST_FOREACH(client, &clients, peer) {
+    if(client->flags == CLIENT_INIT)
+      readyClient(client);
+  }
+}
+
 static void serverErrorEventCB(struct bufferevent *, short, void *);
 static void serverReadCB(struct bufferevent *, void *);
+static void connectToServerSoon(void);
 
-static void connectToServer(void *arg) {
-  struct bufferevent **serverConnection = (struct bufferevent **)arg;
+static void disconnectServer(struct bufferevent *bev) {
+  if(serverConnection == bev)
+    serverConnection = NULL;
+  bufferevent_free(bev);
+}
+
+static void connectToServer(void) {
+  if(serverConnection != NULL || timeToExit)
+    return;
+
   slog(LOG_INFO, SLOG_INFO, "Starting connection lookup for %s:%d", config.host, config.port);
-  *serverConnection = bufferevent_socket_new(event_base, -1, BEV_OPT_CLOSE_ON_FREE);
-  bufferevent_socket_connect_hostname(*serverConnection, NULL, AF_UNSPEC, config.host, config.port);
+  serverConnection = bufferevent_socket_new(event_base, -1, BEV_OPT_CLOSE_ON_FREE);
+  if(serverConnection == NULL) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not allocate server connection.");
+    timeToExit = 1;
+    return;
+  }
+
+  bufferevent_setcb(serverConnection, serverReadCB, NULL, serverErrorEventCB, NULL);
+  bufferevent_setwatermark(serverConnection, EV_READ, 1, 0);
+  bufferevent_enable(serverConnection, EV_READ|EV_WRITE);
+  if(bufferevent_socket_connect_hostname(serverConnection, NULL, AF_UNSPEC, config.host, config.port) != 0) {
+    slog(LOG_ERROR, SLOG_ERROR, "Could not start connection to %s:%d", config.host, config.port);
+    disconnectServer(serverConnection);
+    connectToServerSoon();
+    return;
+  }
   slog(LOG_INFO, SLOG_INFO, "Started to connect to %s:%d", config.host, config.port);
-  bufferevent_setcb(*serverConnection, serverReadCB, NULL, serverErrorEventCB, serverConnection);
-  bufferevent_setwatermark(*serverConnection, EV_READ, 16384, 0);
-  bufferevent_enable(*serverConnection, EV_READ|EV_WRITE);
 }
 
 static void connectToServerCB(int a, short b, void *arg) {
-  connectToServer(arg);
+  (void)a;
+  (void)b;
+  (void)arg;
+  connectToServer();
 }
 
-static void connectToServerSoon(void *ctx) {
-  struct event *ev;
+static void connectToServerSoon(void) {
   struct timeval tv;
+
+  if(timeToExit)
+    return;
 
   tv.tv_sec = 1;
   tv.tv_usec = 0;
 
-  ev = evtimer_new(event_base, connectToServerCB, ctx);
-  evtimer_add(ev, &tv);
+  if(event_base_once(event_base, -1, EV_TIMEOUT, connectToServerCB, NULL, &tv) != 0) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not schedule server reconnect.");
+    timeToExit = 1;
+  }
 }
 
 static void serverReadCB(struct bufferevent *bev, void *ctx) {
+  (void)ctx;
   struct rtlData *data;
+  struct evbuffer *ev = bufferevent_get_input(bev);
   
   if(serverInfo.state == SERVER_NEW) {
-    serverInfo.data.in += bufferevent_read(bev, serverInfo.magic, 4);
-    serverInfo.data.in += bufferevent_read(bev, &serverInfo.tuner_type, 4);
-    serverInfo.data.in += bufferevent_read(bev, &serverInfo.tuner_gain_count, 4);
+    if(evbuffer_get_length(ev) < 12)
+      return;
+
+    serverInfo.data.in += evbuffer_remove(ev, serverInfo.magic, 4);
+    serverInfo.data.in += evbuffer_remove(ev, &serverInfo.tuner_type, 4);
+    serverInfo.data.in += evbuffer_remove(ev, &serverInfo.tuner_gain_count, 4);
     if(serverInfo.magic[0] == 'R' && serverInfo.magic[1] == 'T' && serverInfo.magic[2] == 'L' && serverInfo.magic[3] == '0') {
       serverInfo.state = SERVER_CONNECTED;
       slog(LOG_INFO, SLOG_INFO, "Connected to server.");
+      readyWaitingClients();
     } else { // Failed to receive the magic header
       slog(LOG_ERROR, SLOG_ERROR, "Failed to receive magic header from server.");
-      bufferevent_free(bev);
+      disconnectServer(bev);
+      serverInfo.state = SERVER_NEW;
       if (config.delayed) {
         timeToExit = config.restart ? 2 : 1;
       } else {
-        connectToServerSoon(ctx);
+        connectToServerSoon();
       }
       return;
     }
@@ -228,16 +263,15 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
     for(i = 0; i < 0xd; i++) {
       if(serverInfo.params[i].set) {
         struct command cmd;
-        cmd.cmd = i+1;
+        cmd.cmd = (uint8_t)(i+1);
         cmd.param = serverInfo.params[i].value;
-        slog(LOG_INFO, SLOG_INFO, "Sending command %d with param %lu", cmd.cmd, ntohl(cmd.param));
+        slog(LOG_INFO, SLOG_INFO, "Sending command %d with param %u", cmd.cmd, ntohl(cmd.param));
         serverInfo.data.out += sizeof(cmd);
         bufferevent_write(bev, &cmd, sizeof(cmd));
       }
     }
   }
   
-  struct evbuffer *ev = bufferevent_get_input(bev);
   size_t availLen = evbuffer_get_length(ev);
   
   if(availLen == 0) // We may not have data, so return
@@ -247,42 +281,45 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
     availLen = 256*1024; // Limit our input sizes to 256k chunks
 
   data = (struct rtlData *)malloc(sizeof(struct rtlData) + availLen);
+  if(data == NULL) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not allocate input data buffer.");
+    timeToExit = 1;
+    return;
+  }
   memset(data, 0, sizeof(struct rtlData));
-  data->data = (void *)data + sizeof(struct rtlData);
+  data->data = (uint8_t *)data + sizeof(struct rtlData);
   data->references = 0;
-  serverInfo.data.in += data->len = bufferevent_read(bev, data->data, availLen);
+  data->len = (uint32_t)bufferevent_read(bev, data->data, availLen);
+  serverInfo.data.in += data->len;
   
   if(sendDataToAllClients(data) == 0) {
     // No one was listening
     free(data);
-    if (config.delayed) {
-      slog(LOG_INFO, SLOG_INFO, "Last user disconnected.");
-      timeToExit = config.restart ? 2 : 1;
-    }
   } else {
     dataBlocks++;
     dataBlocksSize += data->len;    
-    // Track the data block
-    //pthread_rwlock_wrlock(&rtlDataLock);
-    //LIST_INSERT_HEAD(&rtlDataList, data, next);    
-    //pthread_rwlock_unlock(&rtlDataLock);
   }
 }
 
 static void serverErrorEventCB(struct bufferevent *bev, short events, void *ctx) {
-  if (events & BEV_EVENT_ERROR)
-    slog(LOG_ERROR, SLOG_ERROR, "Error from server side bufferevent: %s", strerror(errno));
+  (void)ctx;
+  if (events & BEV_EVENT_ERROR) {
+    int error = EVUTIL_SOCKET_ERROR();
+    slog(LOG_ERROR, SLOG_ERROR, "Error from server side bufferevent: %s", evutil_socket_error_to_string(error));
+  }
   if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-    bufferevent_free(bev);
+    disconnectServer(bev);
     slog(LOG_INFO, SLOG_INFO, "Disconnecting server.");
     serverInfo.state = SERVER_NEW;
-    connectToServerSoon(ctx);
+    connectToServerSoon();
   }
 }
 
 static void errorEventCB(struct bufferevent *bev, short events, void *ctx) {
-  if (events & BEV_EVENT_ERROR)
-    slog(LOG_ERROR, SLOG_ERROR, "Error from bufferevent: %s", strerror(errno));
+  if (events & BEV_EVENT_ERROR) {
+    int error = EVUTIL_SOCKET_ERROR();
+    slog(LOG_ERROR, SLOG_ERROR, "Error from bufferevent: %s", evutil_socket_error_to_string(error));
+  }
   if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
     struct client *client = (struct client *)ctx;
     char ipBuf[128];
@@ -299,11 +336,18 @@ static void errorEventCB(struct bufferevent *bev, short events, void *ctx) {
 }
 
 void serverSendCommand(struct command cmd) {
+  if(cmd.cmd < 1 || cmd.cmd > 0xd) {
+    slog(LOG_WARN, SLOG_WARN, "Ignoring invalid command: %u", cmd.cmd);
+    return;
+  }
+
   serverInfo.params[cmd.cmd-1].value = cmd.param;
   serverInfo.params[cmd.cmd-1].set = 1;
-  slog(LOG_LIVE, SLOG_DEBUG, "Sending command to server: %d: %lu", cmd.cmd, ntohl(cmd.param));
-  serverInfo.data.out += sizeof(cmd);
-  bufferevent_write(serverConnection, &cmd, sizeof(cmd));
+  if(serverConnection != NULL && serverInfo.state == SERVER_CONNECTED) {
+    slog(LOG_LIVE, SLOG_DEBUG, "Sending command to server: %d: %u", cmd.cmd, ntohl(cmd.param));
+    serverInfo.data.out += sizeof(cmd);
+    bufferevent_write(serverConnection, &cmd, sizeof(cmd));
+  }
 }
 
 #define RTL_FREQUENCY 0x01
@@ -322,61 +366,62 @@ void serverSendCommand(struct command cmd) {
 
 static void clientReadCB(struct bufferevent *bev, void *ctx) {
   struct command cmd;
-  size_t l;
   struct client *client = (struct client *)ctx;
-  while((l = bufferevent_read(bev, &cmd, sizeof(cmd))) > 0) {
-    client->data.in += l;
+  struct evbuffer *ev = bufferevent_get_input(bev);
+  while(evbuffer_get_length(ev) >= sizeof(cmd)) {
+    evbuffer_remove(ev, &cmd, sizeof(cmd));
+    client->data.in += sizeof(cmd);
     slog(LOG_INFO, SLOG_INFO, "Read from client: %x", cmd.cmd);
     
     switch(cmd.cmd) {
       case RTL_FREQUENCY: // Frequency
-      slog(LOG_INFO, SLOG_INFO, "Set frequency: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set frequency: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_SAMPLE_RATE: // Sample rate
-      slog(LOG_INFO, SLOG_INFO, "Set sample rate: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set sample rate: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_GAIN_MODE: // Gain mode
-      slog(LOG_INFO, SLOG_INFO, "Set gain mode: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set gain mode: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_GAIN: // Set Gain
-      slog(LOG_INFO, SLOG_INFO, "Set gain: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set gain: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_FREQ_CORRECTION: // Set freq correction
-      slog(LOG_INFO, SLOG_INFO, "Set freq correction: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set freq correction: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_STAGE_GAIN: // Stage Gain
-      slog(LOG_INFO, SLOG_INFO, "Set stage gain: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set stage gain: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_TEST_MODE: // Test mode
-      slog(LOG_INFO, SLOG_INFO, "Set test mode: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set test mode: %u", ntohl(cmd.param));
       break;
       case RTL_AGC_MODE: // AGC mode
-      slog(LOG_INFO, SLOG_INFO, "Set AGC mode: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set AGC mode: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_DIRECT_SAMPLING: // Direct sampling
-      slog(LOG_INFO, SLOG_INFO, "Set direct sampling: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set direct sampling: %u", ntohl(cmd.param));
       break;
       case RTL_OFFSET_TUNING: // Offset tuning
-      slog(LOG_INFO, SLOG_INFO, "Set offset tuning: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set offset tuning: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_XTAL: // RTL Xtal
-      slog(LOG_INFO, SLOG_INFO, "Set RTL xtal: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set RTL xtal: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_TUNER_XTAL: // Tuner Xtal
-      slog(LOG_INFO, SLOG_INFO, "Set tuner xtal: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set tuner xtal: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       case RTL_GAIN_BY_INDEX: // Gain by index
-      slog(LOG_INFO, SLOG_INFO, "Set gain by index: %lu", ntohl(cmd.param));
+      slog(LOG_INFO, SLOG_INFO, "Set gain by index: %u", ntohl(cmd.param));
       serverSendCommand(cmd);
       break;
       default: // Ignore it
@@ -387,22 +432,30 @@ static void clientReadCB(struct bufferevent *bev, void *ctx) {
 
 static void connectCB(struct evconnlistener *listener,
     evutil_socket_t sock, struct sockaddr *addr, int len, void *ptr) {
+    (void)ptr;
     struct event_base *base = evconnlistener_get_base(listener);
-#ifdef THREADED
-    struct bufferevent *bev = bufferevent_socket_new(
-            base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE | BEV_OPT_DEFER_CALLBACKS);
-#else
     struct bufferevent *bev = bufferevent_socket_new(
             base, sock, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
-#endif
-
-    if (config.delayed && (serverConnection == NULL || LIST_FIRST(&clients) == NULL)) {
-      slog(LOG_INFO, SLOG_INFO, "Connection to server triggered.");
-      connectToServer(&serverConnection);
+    if(bev == NULL) {
+      slog(LOG_ERROR, SLOG_ERROR, "Could not allocate client connection.");
+      evutil_closesocket(sock);
+      return;
     }
 
-    struct client *client = addClient(bev, ptr);
-    memcpy(&client->sa, addr, len);
+    if (config.delayed && serverConnection == NULL) {
+      slog(LOG_INFO, SLOG_INFO, "Connection to server triggered.");
+      connectToServer();
+    }
+
+    struct client *client = addClient(bev);
+    if(client == NULL) {
+      slog(LOG_ERROR, SLOG_ERROR, "Could not allocate client state.");
+      bufferevent_free(bev);
+      return;
+    }
+    if((size_t)len > sizeof(client->sin6))
+      len = sizeof(client->sin6);
+    memcpy(&client->sa, addr, (size_t)len);
     char ipBuf[128];
     if(client->sa.sa_family == AF_INET)
       evutil_inet_ntop(client->sa.sa_family, &client->sin.sin_addr, ipBuf, 128);
@@ -414,21 +467,21 @@ static void connectCB(struct evconnlistener *listener,
     bufferevent_setcb(bev, clientReadCB, NULL, errorEventCB, client);
     bufferevent_setwatermark(bev, EV_WRITE, 0, 4*1024*1024); // Limit output to 4MB
     bufferevent_enable(bev, EV_READ|EV_WRITE);
-    bufferevent_write(bev, serverInfo.magic, 4);
-    bufferevent_write(bev, &serverInfo.tuner_type, 4);
-    bufferevent_write(bev, &serverInfo.tuner_gain_count, 4);
-    serverInfo.data.out += 12;
-    client->flags = CLIENT_READY;
+    if(serverInfo.state == SERVER_CONNECTED)
+      readyClient(client);
 }
 
 static void dumpClients(struct evhttp_request *req, void *arg) {
+  (void)arg;
   struct evbuffer *evb = NULL;
 
   evb = evbuffer_new();
+  if(evb == NULL) {
+    evhttp_send_error(req, 500, "Could not allocate response");
+    return;
+  }
 
-  pthread_rwlock_rdlock(&clientLock);
-  
-  evbuffer_add_printf(evb, "{\"server\":{\"dataIn\":%lu,\"dataOut\":%lu},\"clients\":[",
+  evbuffer_add_printf(evb, "{\"server\":{\"dataIn\":%" PRIu64 ",\"dataOut\":%" PRIu64 "},\"clients\":[",
     serverInfo.data.in, serverInfo.data.out);
   struct client *client;
   LIST_FOREACH(client, &clients, peer) {
@@ -439,13 +492,13 @@ static void dumpClients(struct evhttp_request *req, void *arg) {
       evutil_inet_ntop(client->sa.sa_family, &client->sin6.sin6_addr, ipBuf, 128);
     else
       snprintf(ipBuf, 128, "from unknown address");
-    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%lu,\"dataOut\":%lu,\"dropped\":{\"size\":%lu,\"count\":%lu},\"connected\":%ld}",
+    evbuffer_add_printf(evb, "{\"client\":{\"host\":\"%s\",\"port\":%u},\"dataIn\":%" PRIu64 ",\"dataOut\":%" PRIu64 ",\"dropped\":{\"size\":%" PRIu64 ",\"count\":%" PRIu64 "},\"connected\":%lld}",
       ipBuf, ntohs(client->sa.sa_family == AF_INET ? client->sin.sin_port : client->sin6.sin6_port),
       client->data.in,
       client->data.out,
       client->data.dropped,
       client->data.droppedCount,
-      client->connected
+      (long long)client->connected
     );
     if(LIST_NEXT(client, peer) != NULL) {
       evbuffer_add_printf(evb, ",");
@@ -453,30 +506,39 @@ static void dumpClients(struct evhttp_request *req, void *arg) {
   }
   evbuffer_add_printf(evb, "]}");
   
-  pthread_rwlock_unlock(&clientLock);
-  
   evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "application/json");
   evhttp_add_header(evhttp_request_get_output_headers(req), "Access-Control-Allow-Origin", "*");
   evhttp_send_reply(req, 200, "OK", evb);
+  evbuffer_free(evb);
 }
 
 void *serverThread(void *arg) {  
+  (void)arg;
+  struct evconnlistener *clientListener = NULL;
+  struct evhttp *http = NULL;
   memset(&serverInfo, 0, sizeof(serverInfo));
+  dataBlocks = 0;
+  dataBlocksSize = 0;
   
   slog(LOG_INFO, SLOG_INFO, "Starting server thread.");
   
-  LIST_INIT(&rtlDataList);
   LIST_INIT(&clients);
-  
-  pthread_rwlock_init(&rtlDataLock, NULL);
-  pthread_rwlock_init(&clientLock, NULL);
   
   event_set_log_callback(logCB);
   
-  evthread_use_pthreads();
+  if(evthread_use_pthreads() != 0) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not initialize libevent threading.");
+    timeToExit = 1;
+    return NULL;
+  }
   
   // Libevent loop
   event_base = event_base_new();
+  if(event_base == NULL) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not allocate event base.");
+    timeToExit = 1;
+    return NULL;
+  }
   
   struct sockaddr_in6 sa;
   socklen_t salen = sizeof(sa);
@@ -485,27 +547,30 @@ void *serverThread(void *arg) {
   sa.sin6_addr = in6addr_any;
   sa.sin6_port = htons(config.clientPort);
   
-  struct evconnlistener *clientListener;
   clientListener = evconnlistener_new_bind(event_base, connectCB, NULL,
     LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
     (struct sockaddr *)&sa, salen);
   if(!clientListener) {
     timeToExit = 1;
     slog(LOG_FATAL, SLOG_FATAL, "Could not listen on the client streaming port.");
-    return NULL;
+    goto cleanup;
   }
   
   slog(LOG_INFO, SLOG_INFO, "Listening for clients on port %d", config.clientPort);
 
   if (!config.delayed) {
-    connectToServer(&serverConnection);
+    connectToServer();
   } else {
     slog(LOG_INFO, SLOG_INFO, "Connection to server delayed.");
   }
 
-  struct evhttp *http;
   struct evhttp_bound_socket *handle;
   http = evhttp_new(event_base);
+  if(http == NULL) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not allocate HTTP server.");
+    timeToExit = 1;
+    goto cleanup;
+  }
 
   evhttp_set_cb(http, "/stats.json", dumpClients, "clients");
   
@@ -514,7 +579,7 @@ void *serverThread(void *arg) {
   if(!handle) {
     slog(LOG_FATAL, SLOG_FATAL, "Could not bind HTTP listener.");
     timeToExit = 1;
-    return NULL;
+    goto cleanup;
   }
 
   int loopCounter = 0;
@@ -528,40 +593,32 @@ void *serverThread(void *arg) {
     
     if((++loopCounter%600) == 0) {
       loopCounter = 0;
-/*      pthread_rwlock_rdlock(&clientLock);
-      struct client *client;
-      unsigned long clientCount = 0;
-      LIST_FOREACH(client, &clients, peer) {
-        clientCount++;
-      }
-      slog(LOG_INFO, SLOG_INFO, "Clients currently connected: %lu", clientCount);
-      pthread_rwlock_unlock(&clientLock);*/
-      pthread_rwlock_rdlock(&rtlDataLock);
       if(dataBlocks > 0)
         slog(LOG_INFO, SLOG_INFO, "Maintaining %lu data buffers, total of %lu bytes.", dataBlocks, dataBlocksSize);
-      pthread_rwlock_unlock(&rtlDataLock);
     }
   }
   
-  pthread_rwlock_wrlock(&clientLock);
+cleanup:
   while(LIST_FIRST(&clients) != NULL) {
     struct client *client = LIST_FIRST(&clients);
     LIST_REMOVE(client, peer);
     bufferevent_free(client->bev);
     free(client);
   }
-  pthread_rwlock_unlock(&clientLock);
-  
-  evconnlistener_free(clientListener);
-  evhttp_free(http);
-  
-  event_base_free(event_base);
 
   if (serverConnection != NULL) {
-    bufferevent_free(serverConnection);
-    serverConnection = NULL;
+    disconnectServer(serverConnection);
     serverInfo.state = SERVER_DISCONNECTED;
     slog(LOG_INFO, SLOG_INFO, "Disconnecting from server.");
+  }
+
+  if(clientListener != NULL)
+    evconnlistener_free(clientListener);
+  if(http != NULL)
+    evhttp_free(http);
+  if(event_base != NULL) {
+    event_base_free(event_base);
+    event_base = NULL;
   }
 
   slog(LOG_INFO, SLOG_INFO, "End of server thread.");
