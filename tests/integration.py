@@ -40,6 +40,14 @@ def connect_with_retry(port):
 
 
 class RtlmuxTest(unittest.TestCase):
+    def start_server_thread(self, listener, target, join_timeout=4):
+        listener.settimeout(join_timeout)
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, join_timeout)
+        self.addCleanup(listener.close)
+        return thread
+
     def start_rtlmux(self, upstream_port, listen_port, *args):
         process = subprocess.Popen(
             [
@@ -84,9 +92,7 @@ class RtlmuxTest(unittest.TestCase):
             connection.close()
             upstream.close()
 
-        thread = threading.Thread(target=serve)
-        thread.start()
-        self.addCleanup(thread.join, 2)
+        self.start_server_thread(upstream, serve)
         self.start_rtlmux(upstream_port, listen_port, "-d")
 
         client = connect_with_retry(listen_port)
@@ -134,9 +140,7 @@ class RtlmuxTest(unittest.TestCase):
             connection.close()
             upstream.close()
 
-        thread = threading.Thread(target=serve)
-        thread.start()
-        self.addCleanup(thread.join, 2)
+        self.start_server_thread(upstream, serve)
         self.start_rtlmux(upstream_port, listen_port)
         self.assertTrue(ready.wait(2))
 
@@ -190,9 +194,7 @@ class RtlmuxTest(unittest.TestCase):
             upstream.close()
             closed.set()
 
-        thread = threading.Thread(target=serve)
-        thread.start()
-        self.addCleanup(thread.join, 2)
+        self.start_server_thread(upstream, serve)
         process = self.start_rtlmux(upstream_port, listen_port)
 
         self.assertTrue(closed.wait(2))
@@ -222,9 +224,7 @@ class RtlmuxTest(unittest.TestCase):
                 disconnected[index].set()
             upstream.close()
 
-        thread = threading.Thread(target=serve)
-        thread.start()
-        self.addCleanup(thread.join, 4)
+        self.start_server_thread(upstream, serve, 6)
         self.start_rtlmux(upstream_port, listen_port, "-d", "-r")
 
         first = connect_with_retry(listen_port)

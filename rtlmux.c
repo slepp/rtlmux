@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 #include <time.h>
 #include <stdarg.h>
 #include <math.h>
@@ -175,6 +176,13 @@ static void readyWaitingClients(void) {
   }
 }
 
+static void signalEventCB(evutil_socket_t signal, short events, void *ctx) {
+  (void)events;
+  (void)ctx;
+  slog(LOG_INFO, SLOG_INFO, "Received signal %d.", (int)signal);
+  timeToExit = 1;
+}
+
 static void serverErrorEventCB(struct bufferevent *, short, void *);
 static void serverReadCB(struct bufferevent *, void *);
 static void connectToServerSoon(void);
@@ -245,6 +253,7 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
     serverInfo.data.in += evbuffer_remove(ev, &serverInfo.tuner_gain_count, 4);
     if(serverInfo.magic[0] == 'R' && serverInfo.magic[1] == 'T' && serverInfo.magic[2] == 'L' && serverInfo.magic[3] == '0') {
       serverInfo.state = SERVER_CONNECTED;
+      bufferevent_setwatermark(bev, EV_READ, 16384, 0);
       slog(LOG_INFO, SLOG_INFO, "Connected to server.");
       readyWaitingClients();
     } else { // Failed to receive the magic header
@@ -516,6 +525,8 @@ void *serverThread(void *arg) {
   (void)arg;
   struct evconnlistener *clientListener = NULL;
   struct evhttp *http = NULL;
+  struct event *sigtermEvent = NULL;
+  struct event *sigintEvent = NULL;
   memset(&serverInfo, 0, sizeof(serverInfo));
   dataBlocks = 0;
   dataBlocksSize = 0;
@@ -538,6 +549,15 @@ void *serverThread(void *arg) {
     slog(LOG_FATAL, SLOG_FATAL, "Could not allocate event base.");
     timeToExit = 1;
     return NULL;
+  }
+
+  sigtermEvent = evsignal_new(event_base, SIGTERM, signalEventCB, NULL);
+  sigintEvent = evsignal_new(event_base, SIGINT, signalEventCB, NULL);
+  if(sigtermEvent == NULL || sigintEvent == NULL ||
+      event_add(sigtermEvent, NULL) != 0 || event_add(sigintEvent, NULL) != 0) {
+    slog(LOG_FATAL, SLOG_FATAL, "Could not configure signal events.");
+    timeToExit = 1;
+    goto cleanup;
   }
   
   struct sockaddr_in6 sa;
@@ -616,6 +636,10 @@ cleanup:
     evconnlistener_free(clientListener);
   if(http != NULL)
     evhttp_free(http);
+  if(sigtermEvent != NULL)
+    event_free(sigtermEvent);
+  if(sigintEvent != NULL)
+    event_free(sigintEvent);
   if(event_base != NULL) {
     event_base_free(event_base);
     event_base = NULL;

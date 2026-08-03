@@ -1,10 +1,9 @@
 #ifndef _SERVER_H_
 #define _SERVER_H_
 
-#include <signal.h>
 #include <stdint.h>
 
-extern volatile sig_atomic_t timeToExit;
+extern unsigned char timeToExit;
 
 extern void *serverThread(void *);
 
