@@ -93,7 +93,7 @@ static void removeClient(struct client *client) {
   }
 }
 
-void releaseDataRef(const void *d, unsigned long len, void *ptr) {
+void releaseDataRef(const void *d, size_t len, void *ptr) {
   (void)d;
   (void)len;
   struct rtlData *data = (struct rtlData *)ptr;

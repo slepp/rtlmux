@@ -23,17 +23,33 @@ jobs:
       - name: Build and test
         run: make test
 
+  static:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+          - platform: linux/arm/v7
+            name: armv7
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build static Linux binary
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           target: release
           outputs: type=local,dest=dist
 
       - name: Verify static Linux binary
         run: |
-          file dist/rtlmux-linux-amd64
-          file dist/rtlmux-linux-amd64 | grep -q "statically linked"
+          file "dist/rtlmux-linux-${{ matrix.name }}"
+          file "dist/rtlmux-linux-${{ matrix.name }}" | grep -q "statically linked"
