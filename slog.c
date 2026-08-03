@@ -301,7 +301,7 @@ void slog(int level, int flag, const char *msg, ...)
     /* Read args */
     va_list args;
     va_start(args, msg);
-    vsprintf(string, msg, args);
+    vsnprintf(string, sizeof(string), msg, args);
     va_end(args);
 
     /* Check logging levels */
@@ -350,7 +350,7 @@ void slog(int level, int flag, const char *msg, ...)
         /* Print output */
         if (level <= slg.level || slg.pretty)
         {
-            if (flag != SLOG_NONE) sprintf(prints, "[%s] %s", strclr(color, alarm), string);
+            if (flag != SLOG_NONE) snprintf(prints, sizeof(prints), "[%s] %s", strclr(color, alarm), string);
             if (level <= slg.level) printf("%s", slog_get(&mdate, "%s\n", prints));
         }
 
@@ -360,7 +360,7 @@ void slog(int level, int flag, const char *msg, ...)
             if (slg.pretty) output = slog_get(&mdate, "%s\n", prints);
             else 
             {
-                if (flag != SLOG_NONE) sprintf(prints, "[%s] %s", alarm, string);
+                if (flag != SLOG_NONE) snprintf(prints, sizeof(prints), "[%s] %s", alarm, string);
                 output = slog_get(&mdate, "%s\n", prints);
             } 
 

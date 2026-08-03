@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-binaries:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            name: amd64
+          - platform: linux/arm64
+            name: arm64
+          - platform: linux/arm/v7
+            name: armv7
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build static binary
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          target: release
+          outputs: type=local,dest=dist
+
+      - name: Verify artifact
+        run: |
+          test -x "dist/rtlmux-linux-${{ matrix.name }}"
+          file "dist/rtlmux-linux-${{ matrix.name }}" | grep -q "statically linked"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rtlmux-linux-${{ matrix.name }}
+          path: dist/rtlmux-linux-${{ matrix.name }}
+          if-no-files-found: error
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: static-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum rtlmux-linux-* > SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check Docker Hub credentials
+        id: dockerhub
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::notice::Docker Hub publishing skipped; configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == "refs/heads/master" || "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Docker Hub publishing skipped for $GITHUB_REF."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/setup-qemu-action@v4
+
+      - if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - if: steps.dockerhub.outputs.enabled == 'true'
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: slepp/rtlmux
+          tags: |
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Publish Docker image
+        if: steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          target: runtime
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
