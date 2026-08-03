@@ -29,7 +29,7 @@ const char *gengetopt_args_info_purpose = "Relay RTL TCP data to multiple client
 
 const char *gengetopt_args_info_usage = "Usage: rtlmux [OPTIONS]...";
 
-const char *gengetopt_args_info_versiontext = "(c) 2016 Stephen Olesen";
+const char *gengetopt_args_info_versiontext = "(c) 2016-2026 Stephen Olesen";
 
 const char *gengetopt_args_info_description = "This will connect to an rtl_tcp server and allow multiple end clients to\nconnect and control the RTL.";
 
